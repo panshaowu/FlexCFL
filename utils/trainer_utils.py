@@ -5,16 +5,18 @@ import numpy as np
     The type of trainer contain: fedavg, fedgroup, splitfed*, splitfg*
 '''
 class TrainConfig(object):
-    def __init__(self, dataset, model, trainer):
+    def __init__(self, dataset, model, trainer, platform="tf"):
         self.trainer_type = trainer
         self.results_path = f'results/{dataset}/'
+        
+        self.platform = platform
         
         self.trainer_config = {
             # This is common config of trainer
             'dataset': dataset,
             'model': model,
             'seed': 2077,
-            'num_rounds': 300,
+            'num_rounds': 30,
             'clients_per_round': 20,
             'eval_every': 1,
             'eval_locally': False,
@@ -95,23 +97,31 @@ class TrainConfig(object):
             #TODO:
             pass
 
-def process_grad(grads):
+def process_grad(grads, platform="tf"):
     '''
     Args:
         grads: grad 
     Return:
         a flattened grad in numpy (1-D array)
     '''
-
-    client_grads = grads[0] # shape = (784, 10)
-    for i in range(1, len(grads)):
-        client_grads = np.append(client_grads, grads[i]) # output a flattened array
+    if platform == "tf":  # tf模式下, grads是list[np.array], 每个元素是一个array格式的网络更新参数
+        client_grads = grads[0] # shape = (784, 10)
+        for i in range(1, len(grads)):
+            client_grads = np.append(client_grads, grads[i]) # output a flattened array
         # (784, 10) append (10,)
-
+    else:  # ms格式下, grads是parameter_dict
+        grads = list(grads.values())
+        client_grads = grads[0].asnumpy()
+        for i in range(1, len(grads)):
+            client_grads = np.append(client_grads, grads[i].asnumpy())
+    # 输出转换为展开为一维张量的array
     return client_grads
 
 def calculate_cosine_dissimilarity(w1, w2):
-    flat_w1, flat_w2 = process_grad(w1), process_grad(w2)
+    if isinstance(w1, list):  # tf2模式, w1和w2均为list[array], 指代一种
+        flat_w1, flat_w2 = process_grad(w1), process_grad(w2)
+    else:
+        flat_w1, flat_w2 = process_grad(w1, platform="ms"), process_grad(w2, platform="ms")
     cosine = np.dot(flat_w1, flat_w2) / (np.linalg.norm(flat_w1) * np.linalg.norm(flat_w2))
     dissimilarity = (1.0 - cosine) / 2.0 # scale to [0, 1] then flip
     return dissimilarity

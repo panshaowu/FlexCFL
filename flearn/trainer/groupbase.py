@@ -1,14 +1,15 @@
 import numpy as np
 import importlib
-import tensorflow as tf
 import random
 import time
 from termcolor import colored
+from collections import Counter
+
+import tensorflow as tf
+import mindspore as ms
+from mindspore import Parameter
 
 from utils.read_data import read_federated_data
-from utils.trainer_utils import TrainConfig
-#from flearn.model.mlp import construct_model
-from utils.trainer_utils import process_grad, calculate_cosine_dissimilarity
 from flearn.server import Server
 from flearn.client import Client
 from flearn.group import Group
@@ -31,8 +32,12 @@ class GroupBase(object):
         else:
             self.group_config.update({'eval_locally': False})
 
+        self.platform = train_config.platform
         # Set the random set
-        tf.random.set_seed(self.seed)
+        if self.platform == "tf":
+            tf.random.set_seed(self.seed)
+        else:
+            ms.set_seed(self.seed)
         np.random.seed(self.seed)
         random.seed(self.seed)
 
@@ -50,27 +55,30 @@ class GroupBase(object):
     def construct_actors(self):
         # 1, Read dataset
         clients, train_data, test_data = read_federated_data(self.dataset)
+        # clients为客户端id列表
+        # train_data和test_data为客户端id列表为key，dict为value的字典，存储对应的端侧数据，端侧数据采用
+        # np.array组织具体数据
 
         # 2, Get model loader according to dataset and model name and construct the model
         # Set the model loader according to the dataset and model name
         model_path = 'flearn.model.%s.%s' % (self.dataset.split('_')[0], self.model)
         self.model_loader = importlib.import_module(model_path).construct_model
         # Construct the model
-        client_model = self.model_loader(self.trainer_type, self.client_config['learning_rate'])
+        client_model = self.model_loader(self.trainer_type, self.client_config['learning_rate'], platform=self.platform)
 
-        # 3, Construct server
-        self.server = Server(model=client_model)
+        # 3, Construct server, 采用上一行初始化的client_model构造Server
+        self.server = Server(model=client_model, platform=self.platform)
 
         # 4, Construct Groups and set their uplink
         for id in range(self.num_group):
             # We need create the empty datasets for each group
             empty_train_data, empty_test_data = {'x':[],'y':[]}, {'x':[],'y':[]}
             self.groups.append(Group(id, self.group_config, empty_train_data, empty_test_data,
-                                [self.server], client_model))
+                                [self.server], client_model, platform=self.platform))
 
         # 5, Construct clients (don't set their uplink)
         self.clients = [Client(id, self.client_config, train_data[id], test_data[id], 
-                        model=client_model) for id in clients]
+                        model=client_model, platform=self.platform) for id in clients]
 
         # 6, Set the server's downlink to groups
         self.server.add_downlink(self.groups)
@@ -87,7 +95,7 @@ class GroupBase(object):
 
         # DEBUG: Randomly schedule all clients
         #self.randomly_schedule_clients()
-    
+
 
     '''
     The iter-group aggregation
@@ -164,10 +172,10 @@ class GroupBase(object):
             # 7, schedule clients after training
             self.schedule_clients_after_training(comm_round, selected_clients, self.groups)
 
-            # 7, Summary this round of training
+            # 8, Summary this round of training
             train_summary = self.summary_results(comm_round, train_results=train_results)
 
-            # 8, Update the auxiliary global model. Simply average group models without weights
+            # 9, Update the auxiliary global model. Simply average group models without weights
             # The empty group will not be aggregated
             self.update_auxiliary_global_model([rest[0] for rest in train_results])
             # Set the training model to the new server model, however this step is not important
@@ -235,12 +243,19 @@ class GroupBase(object):
     def weighted_aggregate(self, updates, weights):
         # Aggregate the updates according their weights
         normalws = np.array(weights, dtype=float) / np.sum(weights, dtype=np.float)
-        num_clients = len(updates)
-        num_layers = len(updates[0])
-        agg_updates = []
-        for la in range(num_layers):
-            agg_updates.append(np.sum([up[la]*pro for up, pro in zip(updates, normalws)], axis=0))
-
+        if isinstance(updates[0], list):  # tf模式, 元素为list[np.array]
+            num_layers = len(updates[0])
+            agg_updates = []
+            for la in range(num_layers):
+                agg_updates.append(np.sum([up[la]*pro for up, pro in zip(updates, normalws)], axis=0))
+        else:  # ms模式, 元素为parameter_dict
+            agg_updates = {key:value*normalws[0] for key, value in updates[0].items()}
+            num_clients = len(updates)
+            for i in range(1, num_clients):
+                for key, value in updates[i].items():
+                    agg_updates[key] += value*normalws[i]
+            for key, value in agg_updates.items():
+                agg_updates[key] = Parameter(value, key)
         return agg_updates # -> list
 
     '''
@@ -375,9 +390,15 @@ class GroupBase(object):
     def update_auxiliary_global_model(self, groups):
         prev_server_params = self.server.latest_params
         new_server_params = self.simply_averaging_aggregate([g.latest_params for g in groups])
-        self.server.latest_updates = [(new-prev) for prev, new in zip(prev_server_params, new_server_params)]
+        if isinstance(prev_server_params, list):  # tf模式, 模型参数为list[np.array]
+            self.server.latest_updates = [(new-prev) for prev, new in zip(prev_server_params, new_server_params)]
+        else:  # ms模式, 模型参数为parameter_dict
+            self.server.latest_updates = {key:Parameter(value - prev_server_params[key], key) for key, value in new_server_params.items()}
+            # self.server.latest_updates = {}
+            # for name, param in new_server_params.items():
+            #     tensor = param.asnumpy().astype(np.float32) - prev_server_params[name].asnumpy().astype(np.float32)
+            #     self.server.latest_updates[name] = ms.Parameter(tensor, name)
         self.server.latest_params = new_server_params
-        return
 
     """ This function will randomly swap <warm> clients' data with probability swap_p
     """

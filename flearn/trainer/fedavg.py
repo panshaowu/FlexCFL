@@ -1,22 +1,24 @@
 import numpy as np
 import importlib
-import tensorflow as tf
 import random
 import time
 from termcolor import colored
 from math import ceil
 
-from utils.read_data import read_federated_data
-from utils.trainer_utils import TrainConfig
-#from flearn.model.mlp import construct_model
+import tensorflow as tf
+import mindspore as ms
+from mindspore import Parameter
+
 from flearn.server import Server
 from flearn.client import Client
+from utils.read_data import read_federated_data
 from utils.export_result import ResultWriter
 
 class FedAvg(object):
     def __init__(self, train_config):
+        self.platform = train_config.platform
         # Transfer trainer config to self, we save the configurations by this trick
-        for key, val in train_config.trainer_config.items(): 
+        for key, val in train_config.trainer_config.items():
             setattr(self, key, val)
         self.trainer_type = train_config.trainer_type
         # Get the config of client
@@ -45,16 +47,17 @@ class FedAvg(object):
         model_path = 'flearn.model.%s.%s' % (self.dataset.split('_')[0], self.model)
         self.model_loader = importlib.import_module(model_path).construct_model
         # Construct the model
-        client_model = self.model_loader('fedavg', self.client_config['learning_rate'])
+        client_model = self.model_loader('fedavg', self.client_config['learning_rate'], platform=self.platform)
         # *Print the summary of model
-        client_model.summary()
+        if self.platform == "tf":
+            client_model.summary()
 
         # 3, Construct server
-        self.server = Server(model=client_model)
+        self.server = Server(model=client_model, platform=self.platform)
 
         # 4, Construct clients and set their uplink
         self.clients = [Client(id, self.client_config, train_data[id], test_data[id], 
-                        uplink=[self.server], model=client_model) for id in clients]
+                        uplink=[self.server], model=client_model, platform=self.platform) for id in clients]
 
         # 5, Set the downlink of server
         self.server.add_downlink(self.clients)
@@ -85,7 +88,10 @@ class FedAvg(object):
             # 2, The server boardcasts the model to clients
             for c in selected_clients:
                 # The selected client calculate the latest_update (This may be many rounds apart)
-                c.latest_updates = [(w1-w0) for w0, w1 in zip(c.latest_params, self.server.latest_params)]
+                if self.platform == "tf":
+                    c.latest_updates = [(w1-w0) for w0, w1 in zip(c.latest_params, self.server.latest_params)]
+                else:
+                    c.latest_updates = {key:ms.Parameter(param - c.latest_params[key], key) for key, param in self.server.latest_params.items()}
                 # Broadcast the gloabl model to selected clients
                 c.latest_params = self.server.latest_params
 
@@ -105,7 +111,7 @@ class FedAvg(object):
             
             # 6, Aggregate these client acoording to number of samples (FedAvg)
             start_time = time.time()
-            agg_updates = self.federated_averaging_aggregate(updates, nks)
+            agg_updates = self.federated_averaging_aggregate(updates, nks, platform=self.platform)
             agg_time = round(time.time() - start_time, 3)
             
             # 7, Apply update to the global model. All clients and sever share
@@ -164,21 +170,29 @@ class FedAvg(object):
         random.seed(self.seed) # Restore the seed
         return selected_clients
     
-    def federated_averaging_aggregate(self, updates, nks):
-        return self.weighted_aggregate(updates, nks)
+    def federated_averaging_aggregate(self, updates, nks, platform="tf"):
+        return self.weighted_aggregate(updates, nks, platform)
 
 
-    def weighted_aggregate(self, updates, weights):
+    def weighted_aggregate(self, updates, weights, platform="tf"):
         # Aggregate the updates according their weights
         normalws = np.array(weights, dtype=float) / np.sum(weights, dtype=np.float)
         num_clients = len(updates)
         num_layers = len(updates[0])
         # Shape=(num_clients, num_layers, num_params)
         # np_updates = np.array(updates, dtype=float).reshape(num_clients, num_layers, -1)
-        agg_updates = []
-        for la in range(num_layers):
-            agg_updates.append(np.sum([up[la]*pro for up, pro in zip(updates, normalws)], axis=0))
-        
+        if platform == "tf":
+            agg_updates = []
+            for la in range(num_layers):
+                agg_updates.append(np.sum([up[la]*pro for up, pro in zip(updates, normalws)], axis=0))
+        else:
+            agg_updates = {key:value*normalws[0] for key, value in updates[0].items()}
+            num_clients = len(updates)
+            for i in range(1, num_clients):
+                for key, value in updates[i].items():
+                    agg_updates[key] += value * normalws[i]
+            for key, value in agg_updates.items():
+                agg_updates[key] = Parameter(value, key)
         # np_agg_updates = np.sum(np_updates*normalws, axis=0) #-> shape=(num_layers, num_params)
         # Convert numpy array to list of array format (keras weights format)
         #agg_updates = [np_agg_updates[i] for i in range(num_layers)]

@@ -33,7 +33,7 @@ class FedGroup(GroupBase):
             print('Random Cluster Centers.')
             selected_clients = random.sample(clients, k=self.num_group)
             for c, g in zip(selected_clients, self.groups):
-                _, _, _, g.latest_params, g.opt_updates = c.pretrain(self.init_params, iterations=50)
+                g.latest_params, g.opt_updates = c.pretrain(self.init_params, iterations=50)
                 g.latest_updates = g.opt_updates
                 c.set_uplink([g])
                 g.add_downlink([c])
@@ -62,7 +62,6 @@ class FedGroup(GroupBase):
             self.update_auxiliary_global_model(self.groups)
             # Update the discrepancy of clustering client
             '''self.refresh_discrepancy_and_dissmilarity(selected_clients)'''
-        return
 
     """ Clustering clients 
         Return: {Cluster ID: (parameter mean, update mean, client_list ->[c1, c2, ...])}
@@ -79,10 +78,10 @@ class FedGroup(GroupBase):
         # Record the execution time
         start_time = time.time()
         for c in clients:
-            _, _, _, csolns[c], cupdates[c] = c.pretrain(self.init_params, iterations=50)
+            csolns[c], cupdates[c] = c.pretrain(self.init_params, iterations=50)
         print("Pre-training takes {}s seconds".format(time.time()-start_time))
 
-        update_array = [process_grad(update) for update in cupdates.values()]
+        update_array = [process_grad(update, platform=self.platform) for update in cupdates.values()] # 类型为list[np.array], 每个元素是一个Client展开的更新值
         delta_w = np.vstack(update_array) # shape=(n_clients, n_params)
         
         # Record the execution time
@@ -91,11 +90,10 @@ class FedGroup(GroupBase):
         svd = TruncatedSVD(n_components=self.num_group, random_state=self.seed)
         decomp_updates = svd.fit_transform(delta_w.T) # shape=(n_params, n_groups)
         print("SVD takes {}s seconds".format(time.time()-start_time))
-        n_components = decomp_updates.shape[-1]
 
         # Record the execution time of EDC calculation
         start_time = time.time()
-        decomposed_cossim_matrix = cosine_similarity(delta_w, decomp_updates.T) # shape=(n_clients, n_clients)
+        decomposed_cossim_matrix = cosine_similarity(delta_w, decomp_updates.T) # shape=(n_clients, n_groups)
 
         ''' There is no need to normalize the data-driven measure because it is a dissimilarity measure
         # Normialize it to dissimilarity [0,1]
@@ -296,7 +294,7 @@ class FedGroup(GroupBase):
             return
 
         else:
-            _, _, _, csoln, cupdate = client.pretrain(self.init_params, iterations=50)
+            _, cupdate = client.pretrain(self.init_params, iterations=50)
 
             # Calculate the cosine dissimilarity between client's update and group's update
             diff_list = []
@@ -306,7 +304,7 @@ class FedGroup(GroupBase):
                 else:
                     opt_updates = g.latest_updates
                 diff = calculate_cosine_dissimilarity(cupdate, opt_updates)
-                diff_list.append((g, diff))
+                diff_list.append((g, diff))  # 采用tuple维护client和对应group的相似度
             if random_assign == True:
                 # RAC: Randomly assign client
                 assign_group = random.choice(self.groups)

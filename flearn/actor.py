@@ -1,5 +1,8 @@
 import numpy as np
 
+import mindspore as ms
+import mindspore.dataset as ds
+
 from math import ceil
 
 '''
@@ -8,11 +11,12 @@ like Server, Group, Client.
 '''
 
 class Actor(object):
-    def __init__(self, id, actor_type, train_data={'x':[],'y':[]}, test_data={'x':[],'y':[]}, model=None):
+    def __init__(self, id, actor_type, train_data={'x':[],'y':[]}, test_data={'x':[],'y':[]}, model=None, platform="tf"):
         self.id = id
         self.train_data = train_data
         self.test_data = test_data
-        self.model = model # callable tf.keras.model
+        self.model = model # callable tf.keras.model or ms.train.Model
+        self.platform = platform
         self.actor_type = actor_type
         self.name = 'NULL'
         # The latest model parameter and update of this actor, which will be modified by train, aggregate, refresh, init
@@ -37,43 +41,41 @@ class Actor(object):
         self.name = str(self.actor_type) + str(self.id)
         # Initialize the latest model weights and updates
         self.latest_params, self.local_soln = self.get_params(), self.get_params()
-        self.latest_updates = [np.zeros_like(ws) for ws in self.latest_params]
-        self.local_gradient = [np.zeros_like(ws) for ws in self.latest_params]
+        if self.platform == "tf":  # tf采用list[np.array]维护模型
+            self.latest_updates = [np.zeros_like(ws) for ws in self.latest_params]
+            self.local_gradient = [np.zeros_like(ws) for ws in self.latest_params]
+        else:  # ms采用parameter_dict维护模型
+            self.latest_updates = {key:value.clone() for key, value in self.latest_params.items()}
+            self.local_gradient = {key:value.clone() for key, value in self.latest_params.items()}
 
-    '''Return the parameters of global model instance
-    '''
     def get_params(self):
-        if self.model:
+        '''Return the parameters of global model instance. For ms, return the parameter_dict.'''
+        if not self.model:
+            raise ValueError("Act.get_params() failed: the self.model is None")
+        if self.platform == "tf":
             return self.model.get_weights()
+        else:  # 采用Parameter.clone()似乎亦可
+            params_iter = self.model.loss_net.parameters_and_names()
+            # parameter_dict = {}
+            # for name, param in params_iter:
+            #     tensor = param.asnumpy().astype(np.float32)
+            #     parameter_dict[name] = ms.Parameter(tensor, name)
+            parameter_dict = {key:value.copy() for key, value in params_iter}
+            return parameter_dict
     
     def set_params(self, weights):
         # Set the params of model,
         # But the latest_params and latest_updates will not be refreshed
-        if self.model:
+        # For ms, the input weights shall be a parameter_dict
+        if not self.model:
+            raise ValueError("Act.set_params() failed: the self.model is None")
+        if self.platform == "tf":
             self.model.set_weights(weights)
-
-    """     
-    def solve_gradients(self, num_epoch=1, batch_size=10):
-        '''
-        Solve the local optimization base on local training data, 
-        the gradient is NOT applied to model
-        
-        Return: num_samples, Gradients
-        '''
-        if self.train_data['y'] > 0:
-            X, y_true = self.train_data['x'], self.train_data['y']
-            num_samples = y_true.shape[0]
-            with tf.GradientTape() as tape:
-                y_pred = self.model(X)
-                loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
-            gradients = tape.gradient(loss, self.model.trainable_variables)
-            
-            return num_samples, gradients
         else:
-            # Return 0 and all zero gradients [0, 0, ...],
-            # if this actor has not training set
-            return 0, [np.zeros_like(ws) for ws in self.latest_updates]
-    """
+            if not isinstance(weights, dict):
+                raise ValueError("Act.set_params() failed: the input is not a dict")
+            ms.load_param_into_net(self.model.loss_net, weights)
+
 
     def solve_inner(self, num_epoch=1, batch_size=10, pretrain=False):
         '''
@@ -83,6 +85,11 @@ class Actor(object):
         
         Return: num_samples, train_acc, train_loss, update
         '''
+        def build_ms_dataset(data, batch_size):
+            dataset = ds.NumpySlicesDataset((data["x"], data["y"].astype(np.int32)), ["x", "y"], shuffle=True)
+            dataset = dataset.batch(batch_size=batch_size)
+            return dataset
+
         if self.train_data['y'].shape[0] > 0:
             X, y_true = self.train_data['x'], self.train_data['y']
             num_samples = y_true.shape[0]
@@ -92,9 +99,22 @@ class Actor(object):
             t0_weights = self.latest_params
             self.set_params(t0_weights)
             # Use model.fit() to train model
-            history = self.model.fit(X, y_true, batch_size, num_epoch, verbose=0)
-            t1_weights = self.get_params()
-            gradient = [(w1-w0) for w0, w1 in zip(t0_weights, t1_weights)]
+            if self.platform == "tf":
+                history = self.model.fit(X, y_true, batch_size, num_epoch, verbose=0)
+                t1_weights = self.get_params()
+                gradient = [(w1-w0) for w0, w1 in zip(t0_weights, t1_weights)]
+                train_acc = history.history['accuracy']
+                train_loss = history.history['loss']
+            else:
+                data = {"x": X, "y": y_true}
+                dataset = build_ms_dataset(data, batch_size)
+                train_loss, train_acc = [], []
+                for _ in range(num_epoch):
+                    loss, acc = self.model.train_on_epoch(dataset)
+                    train_loss.append(loss)
+                    train_acc.append(acc)
+                t1_weights = self.get_params()
+                gradient = {key:value - t0_weights[key] for key, value in t1_weights.items()}
             
             # Roll-back the weights of current model
             self.set_params(backup_params)
@@ -105,8 +125,6 @@ class Actor(object):
                 self.local_gradient = gradient
             # Get the train accuracy and train loss
             #print(history.history) # Debug
-            train_acc = history.history['accuracy']
-            train_loss = history.history['loss']
             #print('actor.py:104', train_acc) # DEBUG
             return num_samples, train_acc, train_loss, t1_weights, gradient
         else:
@@ -147,18 +165,32 @@ class Actor(object):
 
                 yield (batched_x, batched_y)
 
+        def build_ms_dataset(data, batch_size):
+            dataset = ds.NumpySlicesDataset((data["x"], data["y"].astype(np.int32)), ["x", "y"], shuffle=True)
+            dataset = dataset.batch(batch_size=batch_size)
+            return dataset
+
         num_samples = self.train_data['y'].shape[0]
         if num_samples == 0:
-            return 0, [0], [0], self.latest_params, [np.zeros_like(ws) for ws in self.latest_params]
+            return self.latest_params, [np.zeros_like(ws) for ws in self.latest_params]
 
         backup_params = self.get_params()
         t0_weights = self.latest_params
         self.set_params(t0_weights)
-        train_results = []
-        for X, y in batch_data_multiple_iters(self.train_data, batch_size, num_iters):
-            train_results.append(self.model.train_on_batch(X, y))
-        t1_weights = self.get_params()
-        gradient = [(w1-w0) for w0, w1 in zip(t0_weights, t1_weights)]
+        if self.platform == "tf":
+            for X, y in batch_data_multiple_iters(self.train_data, batch_size, num_iters):
+                self.model.train_on_batch(X, y)
+            t1_weights = self.get_params()
+            gradient = [(w1-w0) for w0, w1 in zip(t0_weights, t1_weights)]
+        else:
+            dataset = build_ms_dataset(self.train_data, batch_size)
+            iterator = dataset.create_tuple_iterator()
+            for _ in range(ceil(num_iters/dataset.get_batch_size())):
+                for item in iterator:
+                    loss, acc = self.model.train_on_batch(item[0], item[1])
+                    # print("loss: , acc: " % (loss, acc))
+            t1_weights = self.get_params()
+            gradient = {key:value - t0_weights[key] for key, value in t1_weights.items()}
         # Roll-back the weights of model
         self.set_params(backup_params)
         if pretrain == False:
@@ -166,10 +198,8 @@ class Actor(object):
             self.local_soln = t1_weights
             # Calculate the updates
             self.local_gradient = gradient
-        train_acc = [rest[1] for rest in train_results]
-        train_loss = [rest[0] for rest in train_results]
-        
-        return num_samples, train_acc, train_loss, t1_weights, gradient
+
+        return t1_weights, gradient
 
     def apply_update(self, update):
         '''
@@ -178,7 +208,10 @@ class Actor(object):
             1, Latest model params
         '''
         t0_weights = self.get_params()
-        t1_weights = [(w0+up) for up, w0 in zip(update, t0_weights)]
+        if self.platform == "tf":
+            t1_weights = [(w0+up) for up, w0 in zip(update, t0_weights)]
+        else:
+            t1_weights = {key:ms.Parameter(value+update[key], key) for key, value in t0_weights.items()}
         self.set_params(t1_weights) # The group training model is set to new weights.
         # Refresh the latest_params and latest_updates attrs
         self.latest_updates = update
@@ -191,7 +224,12 @@ class Actor(object):
         The update will not apply to self.model, compare to apply_update()
         '''
         prev_params = self.latest_params
-        latest_params = [(w0+up) for up, w0 in zip(update, prev_params)]
+        if self.platform == "tf":
+            latest_params = [(w0+up) for up, w0 in zip(update, prev_params)]
+        else:
+            latest_params = {key:ms.Parameter(value+update[key], key) for key, value in prev_params.items()}
+            for key, param in latest_params.items():
+                latest_params[key] = ms.Parameter(param, key)
         self.latest_updates = update
         self.latest_params = latest_params
         return self.latest_params, self.latest_updates
@@ -201,13 +239,22 @@ class Actor(object):
         Test the model (self.latest_params) on local test dataset
         Return: Number of test samples, test accuracy, test loss
         '''
+        def build_ms_dataset(data, batch_size):
+            dataset = ds.NumpySlicesDataset((data["x"], data["y"].astype(np.int32)), ["x", "y"], shuffle=True)
+            dataset = dataset.batch(batch_size=batch_size)
+            return dataset
+
         if self.test_data['y'].shape[0] > 0:
             # Backup the current model params
             backup_params = self.get_params()
             # Set the current model to actor's params
             self.set_params(self.latest_params)
-            X, y_true = self.test_data['x'], self.test_data['y']
-            loss, acc = self.model.evaluate(X, y_true, verbose=0)
+            if self.platform == "tf":
+                X, y_true = self.test_data['x'], self.test_data['y']
+                loss, acc = self.model.evaluate(X, y_true, verbose=0)
+            else:
+                dataset = build_ms_dataset(self.test_data, 10)
+                loss, acc = self.model.evaluate(dataset)
             # Recover the model
             self.set_params(backup_params)
             return self.test_data['y'].shape[0], acc, loss

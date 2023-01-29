@@ -1,5 +1,5 @@
 import numpy as np
-import tensorflow as tf
+
 from flearn.actor import Actor
 from utils.trainer_utils import process_grad, calculate_cosine_dissimilarity
 from scipy.stats import wasserstein_distance
@@ -9,9 +9,9 @@ Define the client of federated learning framework
 '''
 
 class Client(Actor):
-    def __init__(self, id, config, train_data={'x':[],'y':[]}, test_data={'x':[],'y':[]}, uplink=[], model=None):
+    def __init__(self, id, config, train_data={'x':[],'y':[]}, test_data={'x':[],'y':[]}, uplink=[], model=None, platform="tf"):
         actor_type = 'client'
-        super(Client, self).__init__(id, actor_type, train_data, test_data, model)
+        super(Client, self).__init__(id, actor_type, train_data, test_data, model, platform)
         if len(uplink) > 0:
             self.add_uplink(uplink)
         self.clustering = False # Is the client join the clustering proceudre.
@@ -27,13 +27,17 @@ class Client(Actor):
         self.max_temp = self.temperature # Save the max temperature
         self.original_train_data = {'x': np.copy(self.train_data['x']), 'y': np.copy(self.train_data['y'])}
 
-        self.label_array = None
+        self.label_array = None  # 该Client所持有的label类型, array类型
         self.distribution_shift = False
 
         self.train_size = self.train_data['y'].shape[0]
         self.test_size = self.test_data['y'].shape[0]
 
-        self.num_classes = self.model.layers[-1].output_shape[-1]
+        if self.platform == "tf":
+            self.num_classes = self.model.layers[-1].output_shape[-1]
+        else:
+            self.num_classes = self.model.class_num
+
         self.train_label_count = np.zeros(self.num_classes)
         label, count = np.unique(self.train_data['y'], return_counts=True)
         np.put(self.train_label_count, label, count)
@@ -42,7 +46,7 @@ class Client(Actor):
         self.refresh()
         #print(np.unique(self.train_data['y']), np.unique(self.test_data['y'])) 
 
-    # The client is the end point of FL framework 
+    # The client is the end point of FL framework
     def has_downlink(self):
         return False
 
@@ -54,7 +58,7 @@ class Client(Actor):
             self.train_size = self.train_data['y'].shape[0]
 
         return self.trainable
-    
+
     def check_testable(self):
         if self.test_data['y'].shape[0] > 0:
             self.testable = True
@@ -110,18 +114,15 @@ class Client(Actor):
     def pretrain(self, model_params, iterations=20):
         backup_params = self.latest_params
         self.latest_params = model_params
-        num_samples, acc, loss, soln, update = self.solve_iters(iterations, self.batch_size, pretrain=True)
-        #num_samples, acc, loss, soln, update = self.solve_inner(1, self.batch_size, pretrain=True)
-        
+        soln, update = self.solve_iters(iterations, self.batch_size, pretrain=True)
         # Restore latest_params after training
         self.latest_params = backup_params
-
-        return num_samples, acc[-1], loss[-1], soln, update
+        return soln, update
 
     # Update the discrepancy and cosine dissimilarity
     def update_difference(self):
         def _calculate_l2_distance(m1, m2):
-            v1, v2 = process_grad(m1), process_grad(m2)
+            v1, v2 = process_grad(m1, self.platform), process_grad(m2, self.platform)
             l2d = np.linalg.norm(v1-v2)
             return l2d
 
@@ -149,5 +150,3 @@ class Client(Actor):
             return curr_count
         else:
             return None
-
-

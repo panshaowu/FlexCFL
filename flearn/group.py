@@ -1,17 +1,19 @@
-from flearn.actor import Actor
-import numpy as np
 from math import floor
+import numpy as np
 
+from mindspore import Parameter
+
+from flearn.actor import Actor
 '''
 Define the group of federated learning framework, 
 <Group> is similar with <Server>
 '''
 
 class Group(Actor):
-    def __init__(self, id, config, train_data={'x':[],'y':[]}, test_data={'x':[],'y':[]}, uplink=[], model=None):
+    def __init__(self, id, config, train_data={'x':[],'y':[]}, test_data={'x':[],'y':[]}, uplink=[], model=None, platform="tf"):
         actor_type = 'group'
-        super(Group, self).__init__(id, actor_type, train_data, test_data, model=model)
-        if len(uplink) > 0:
+        super(Group, self).__init__(id, actor_type, train_data, test_data, model=model, platform=platform)
+        if len(uplink) > 0:  # list, Group的uplink是Server
             self.add_uplink(uplink)
 
         # transfer client config to self
@@ -106,10 +108,19 @@ class Group(Actor):
         epsilon = 1e-5 # Prevent divided by 0
         normalws = np.array(weights, dtype=float) / (np.sum(weights, dtype=np.float) + epsilon)
         num_layers = len(updates[0])
-        agg_updates = []
-        for la in range(num_layers):
-            agg_updates.append(np.sum([up[la]*pro for up, pro in zip(updates, normalws)], axis=0))
-
+        if self.platform == "tf":
+            agg_updates = []
+            for la in range(num_layers):
+                agg_updates.append(np.sum([up[la]*pro for up, pro in zip(updates, normalws)], axis=0))
+        else:
+            agg_updates = {}
+            for name, param in updates[0].items():
+                agg_updates[name] = param * normalws[0]
+            for i in range(1, len(updates)):
+                for name, param in updates[i].items():
+                    agg_updates[name] += param * normalws[i]
+            for name, param in agg_updates.items():
+                agg_updates[name] = Parameter(param, name)
         return agg_updates # -> list
 
     def _calculate_weighted_metric(metrics, nks):
@@ -147,7 +158,10 @@ class Group(Actor):
             # 1, Broadcast group's model to client
             for node in valid_nodes:
                 # Calculate the latest updates of clients
-                node.latest_updates = [(w1-w0) for w0, w1 in zip(node.latest_params, group_params)]
+                if self.platform == "tf":  # tf模式
+                    node.latest_updates = [(w1-w0) for w0, w1 in zip(node.latest_params, group_params)]
+                else:
+                    node.latest_updates = {key:value - node.latest_params[key] for key, value in group_params.items()}
                 node.latest_params = group_params
             
             # 2, Train the neural model of client and save the results
@@ -156,9 +170,9 @@ class Group(Actor):
                 train_results.append([node, num_samples, train_acc, train_loss, update])
             
             # 3, Aggregate the clients using FedAvg
+            temps = [rest[0].temperature for rest in train_results]
             nks = [rest[1] for rest in train_results] # -> list
             updates = [rest[4] for rest in train_results] # -> list
-            temps = [rest[0].temperature for rest in train_results]
             max_temp = train_results[0][0].max_temp
             if self.aggregation_strategy == 'temp' and max_temp is not None:
                 agg_updates = self.federated_averaging_aggregate_with_temperature(updates, nks, temps, max_temp)

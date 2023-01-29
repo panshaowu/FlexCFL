@@ -7,10 +7,10 @@ Define the server of federated learning framework
 '''
 
 class Server(Actor):
-    def __init__(self, train_data={'x':[],'y':[]}, test_data={'x':[],'y':[]}, downlink=[], model=None):
+    def __init__(self, train_data={'x':[],'y':[]}, test_data={'x':[],'y':[]}, downlink=[], model=None, platform="tf"):
         actor_type = 'server'
         id = 0
-        super(Server, self).__init__(id, actor_type, train_data, test_data, model)
+        super(Server, self).__init__(id, actor_type, train_data, test_data, model, platform=platform)
         if len(downlink) > 0:
             self.add_downlink(downlink)
         # We need refresh model attribute like 
