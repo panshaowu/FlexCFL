@@ -1,6 +1,5 @@
 import numpy as np
 
-import mindspore as ms
 import mindspore.dataset as ds
 
 from math import ceil
@@ -28,11 +27,11 @@ class Actor(object):
         # which like solve inner and solve iter of actor, train and pretrain of client
         self.local_soln, self.local_gradient = None, None
         # init train and test size to zero, it will depend on the actor type
-        self.train_size, self.test_size = 0, 0 
+        self.train_size, self.test_size = 0, 0
         self.uplink, self.downlink = [], [] # init to empty, depend on the actor type
         # Is this actor can train or test,
         # Note: This variable have differenct meaning according to differnent type of actor
-        self.trainable, self.testable = False, False 
+        self.trainable, self.testable = False, False
 
         self.preprocess()
 
@@ -45,8 +44,8 @@ class Actor(object):
             self.latest_updates = [np.zeros_like(ws) for ws in self.latest_params]
             self.local_gradient = [np.zeros_like(ws) for ws in self.latest_params]
         else:  # ms采用parameter_dict维护模型
-            self.latest_updates = {key:value.clone() for key, value in self.latest_params.items()}
-            self.local_gradient = {key:value.clone() for key, value in self.latest_params.items()}
+            self.latest_updates = {key:value for key, value in self.latest_params.items()}
+            self.local_gradient = {key:value for key, value in self.latest_params.items()}
 
     def get_params(self):
         '''Return the parameters of global model instance. For ms, return the parameter_dict.'''
@@ -54,15 +53,11 @@ class Actor(object):
             raise ValueError("Act.get_params() failed: the self.model is None")
         if self.platform == "tf":
             return self.model.get_weights()
-        else:  # 采用Parameter.clone()似乎亦可
+        else:  # 采用numpy数据结构进行维护管理,其与网络中的Parameter共用存储空间
             params_iter = self.model.loss_net.parameters_and_names()
-            # parameter_dict = {}
-            # for name, param in params_iter:
-            #     tensor = param.asnumpy().astype(np.float32)
-            #     parameter_dict[name] = ms.Parameter(tensor, name)
-            parameter_dict = {key:value.copy() for key, value in params_iter}
+            parameter_dict = {key:value.asnumpy().copy() for key, value in params_iter}
             return parameter_dict
-    
+
     def set_params(self, weights):
         # Set the params of model,
         # But the latest_params and latest_updates will not be refreshed
@@ -71,25 +66,27 @@ class Actor(object):
             raise ValueError("Act.set_params() failed: the self.model is None")
         if self.platform == "tf":
             self.model.set_weights(weights)
-        else:
+        else:  # ms应当输入的是dict, key为Parameter名称, value为对应的np.array
             if not isinstance(weights, dict):
                 raise ValueError("Act.set_params() failed: the input is not a dict")
-            ms.load_param_into_net(self.model.loss_net, weights)
+            params_iter = self.model.loss_net.parameters_and_names()
+            for key, value in params_iter:
+                param_np = value.asnumpy()
+                param_np[:] = weights[key]
 
+    def build_ms_dataset(self, data, batch_size):
+        dataset = ds.NumpySlicesDataset((data["x"], data["y"].astype(np.int32)), ["x", "y"], shuffle=True)
+        dataset = dataset.batch(batch_size=batch_size)
+        return dataset
 
     def solve_inner(self, num_epoch=1, batch_size=10, pretrain=False):
         '''
         Solve the local optimization base on local training data,
         This Function will not change the params of model,
         Call apply_update() to change model
-        
+
         Return: num_samples, train_acc, train_loss, update
         '''
-        def build_ms_dataset(data, batch_size):
-            dataset = ds.NumpySlicesDataset((data["x"], data["y"].astype(np.int32)), ["x", "y"], shuffle=True)
-            dataset = dataset.batch(batch_size=batch_size)
-            return dataset
-
         if self.train_data['y'].shape[0] > 0:
             X, y_true = self.train_data['x'], self.train_data['y']
             num_samples = y_true.shape[0]
@@ -107,7 +104,7 @@ class Actor(object):
                 train_loss = history.history['loss']
             else:
                 data = {"x": X, "y": y_true}
-                dataset = build_ms_dataset(data, batch_size)
+                dataset = self.build_ms_dataset(data, batch_size)
                 train_loss, train_acc = [], []
                 for _ in range(num_epoch):
                     loss, acc = self.model.train_on_epoch(dataset)
@@ -115,7 +112,7 @@ class Actor(object):
                     train_acc.append(acc)
                 t1_weights = self.get_params()
                 gradient = {key:value - t0_weights[key] for key, value in t1_weights.items()}
-            
+
             # Roll-back the weights of current model
             self.set_params(backup_params)
             if pretrain == False:
@@ -165,11 +162,6 @@ class Actor(object):
 
                 yield (batched_x, batched_y)
 
-        def build_ms_dataset(data, batch_size):
-            dataset = ds.NumpySlicesDataset((data["x"], data["y"].astype(np.int32)), ["x", "y"], shuffle=True)
-            dataset = dataset.batch(batch_size=batch_size)
-            return dataset
-
         num_samples = self.train_data['y'].shape[0]
         if num_samples == 0:
             return self.latest_params, [np.zeros_like(ws) for ws in self.latest_params]
@@ -183,12 +175,12 @@ class Actor(object):
             t1_weights = self.get_params()
             gradient = [(w1-w0) for w0, w1 in zip(t0_weights, t1_weights)]
         else:
-            dataset = build_ms_dataset(self.train_data, batch_size)
+            dataset = self.build_ms_dataset(self.train_data, batch_size)
             iterator = dataset.create_tuple_iterator()
             for _ in range(ceil(num_iters/dataset.get_batch_size())):
                 for item in iterator:
                     loss, acc = self.model.train_on_batch(item[0], item[1])
-                    # print("loss: , acc: " % (loss, acc))
+                    # print("loss: %f, acc: %f" % (loss.asnumpy().tolist(), acc))
             t1_weights = self.get_params()
             gradient = {key:value - t0_weights[key] for key, value in t1_weights.items()}
         # Roll-back the weights of model
@@ -211,13 +203,12 @@ class Actor(object):
         if self.platform == "tf":
             t1_weights = [(w0+up) for up, w0 in zip(update, t0_weights)]
         else:
-            t1_weights = {key:ms.Parameter(value+update[key], key) for key, value in t0_weights.items()}
+            t1_weights = {key:value + update[key] for key, value in t0_weights.items()}
         self.set_params(t1_weights) # The group training model is set to new weights.
         # Refresh the latest_params and latest_updates attrs
         self.latest_updates = update
         self.latest_params = t1_weights
         return self.latest_params
-    
     def fresh_latest_params_updates(self, update):
         '''
         Call this function to fresh the latest_params and latst_updates
@@ -227,23 +218,16 @@ class Actor(object):
         if self.platform == "tf":
             latest_params = [(w0+up) for up, w0 in zip(update, prev_params)]
         else:
-            latest_params = {key:ms.Parameter(value+update[key], key) for key, value in prev_params.items()}
-            for key, param in latest_params.items():
-                latest_params[key] = ms.Parameter(param, key)
+            latest_params = {key:value + update[key] for key, value in prev_params.items()}
         self.latest_updates = update
         self.latest_params = latest_params
         return self.latest_params, self.latest_updates
-    
+
     def test_locally(self):
         '''
         Test the model (self.latest_params) on local test dataset
         Return: Number of test samples, test accuracy, test loss
         '''
-        def build_ms_dataset(data, batch_size):
-            dataset = ds.NumpySlicesDataset((data["x"], data["y"].astype(np.int32)), ["x", "y"], shuffle=True)
-            dataset = dataset.batch(batch_size=batch_size)
-            return dataset
-
         if self.test_data['y'].shape[0] > 0:
             # Backup the current model params
             backup_params = self.get_params()
@@ -253,7 +237,7 @@ class Actor(object):
                 X, y_true = self.test_data['x'], self.test_data['y']
                 loss, acc = self.model.evaluate(X, y_true, verbose=0)
             else:
-                dataset = build_ms_dataset(self.test_data, 10)
+                dataset = self.build_ms_dataset(self.test_data, 10)
                 loss, acc = self.model.evaluate(dataset)
             # Recover the model
             self.set_params(backup_params)
@@ -285,7 +269,7 @@ class Actor(object):
         if isinstance(nodes, Actor):
             self.uplink = list(set(self.uplink + [nodes]))
         return
-    
+
     def delete_downlink(self, nodes):
         if isinstance(nodes, list):
             self.downlink = [c for c in self.downlink if c not in nodes]
@@ -320,23 +304,19 @@ class Actor(object):
         nodes_trainable = False
         valid_nodes = []
         for node in selected_nodes:
-            if node in self.downlink:
-                if node.check_trainable() == True:
-                    nodes_trainable = True
-                    valid_nodes.append(node)
+            if node in self.downlink and node.check_trainable() == True:
+                nodes_trainable = True
+                valid_nodes.append(node)
         return nodes_trainable, valid_nodes
 
     def check_selected_testable(self, selected_nodes):
-        ''' 
-        Check The selected nodes whether can be tested 
-        '''
+        ''' Check The selected nodes whether can be tested '''
         nodes_testable = False
         valid_nodes = []
         for node in selected_nodes:
-            if node in self.downlink:
-                if node.check_testable() == True:
-                    nodes_testable = True
-                    valid_nodes.append(node)
+            if node in self.downlink and node.check_testable() == True:
+                nodes_testable = True
+                valid_nodes.append(node)
         return nodes_testable, valid_nodes
 
     # Train() and Test() depend on actor type
@@ -349,5 +329,6 @@ class Actor(object):
     # trainable and testable depend on actor type
     def check_trainable():
         return
+
     def check_testable():
         return

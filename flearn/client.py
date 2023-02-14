@@ -18,10 +18,10 @@ class Client(Actor):
         self.discrepancy = 0 # The discrepancy between this client and its first uplink node
         # The cosine dissimilarity between this client and its first uplink node
         # Cosine Dissimilarity, definition: (1-cosine) / 2
-        self.cosine_dissimilarity = 0 
+        self.cosine_dissimilarity = 0
 
         # transfer client config to self
-        for key, val in config.items(): 
+        for key, val in config.items():
             setattr(self, key, val)
 
         self.max_temp = self.temperature # Save the max temperature
@@ -44,7 +44,6 @@ class Client(Actor):
         self.emd_threshold = (1.0 / self.num_classes) * self.train_size * 0.2
 
         self.refresh()
-        #print(np.unique(self.train_data['y']), np.unique(self.test_data['y'])) 
 
     # The client is the end point of FL framework
     def has_downlink(self):
@@ -91,11 +90,11 @@ class Client(Actor):
             loss = test loss
         '''
         self.check_testable()
-        if from_uplink == True:
-            if len(self.uplink) == 0: 
+        if from_uplink:
+            if len(self.uplink) == 0:
                 print(f'Warning: Node {self.id} does not have an uplink model for testing.')
                 return 0, 0, 0
-            
+
             # Temporarily set client's latest_params to first uplink's latest_params
             backup_params = self.latest_params
             self.latest_params = self.uplink[0].latest_params

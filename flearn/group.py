@@ -1,8 +1,6 @@
 from math import floor
 import numpy as np
 
-from mindspore import Parameter
-
 from flearn.actor import Actor
 '''
 Define the group of federated learning framework, 
@@ -114,13 +112,9 @@ class Group(Actor):
                 agg_updates.append(np.sum([up[la]*pro for up, pro in zip(updates, normalws)], axis=0))
         else:
             agg_updates = {}
-            for name, param in updates[0].items():
-                agg_updates[name] = param * normalws[0]
-            for i in range(1, len(updates)):
-                for name, param in updates[i].items():
-                    agg_updates[name] += param * normalws[i]
-            for name, param in agg_updates.items():
-                agg_updates[name] = Parameter(param, name)
+            for key in updates[0].keys():
+                value_list = [up[key]*pro for up, pro in zip(updates, normalws)]
+                agg_updates[key] = np.sum(value_list, axis=0)
         return agg_updates # -> list
 
     def _calculate_weighted_metric(metrics, nks):

@@ -4,18 +4,16 @@ import random
 import time
 from termcolor import colored
 from collections import Counter
+from math import ceil
 
 import tensorflow as tf
 import mindspore as ms
-from mindspore import Parameter
 
 from utils.read_data import read_federated_data
 from flearn.server import Server
 from flearn.client import Client
 from flearn.group import Group
-from collections import Counter
 from utils.export_result import ResultWriter
-from math import ceil
 
 class GroupBase(object):
     def __init__(self, train_config):
@@ -137,7 +135,7 @@ class GroupBase(object):
             # 1, Random select clients
             selected_clients = self.select_clients(comm_round, self.clients_per_round)
             #selected_clients = self.clients[:20] # DEBUG, only use first 20 clients to train
-            
+
             # * Change the clients's data distribution
             self.data_distribution_shift(comm_round, self.clients, self.shift_type, self.swap_p)
 
@@ -184,12 +182,12 @@ class GroupBase(object):
             # 9, Test the model (Last round training) every eval_every round and last round
             if comm_round % self.eval_every == 0 or comm_round == self.num_rounds:
                 start_time = time.time()
-                
+
                 # Test model on all groups
                 test_results = self.server.test(self.server.downlink)
                 # Summary this test
                 test_summary = self.summary_results(comm_round, test_results=test_results)
-                
+
                 if self.eval_global_model == True:
                     # Test model on the server auxiliary model
                     test_samples, test_acc, test_loss = self.server.test_locally()
@@ -205,7 +203,7 @@ class GroupBase(object):
             # 10, Print the train, aggregate, test time
             print(f'Round: {comm_round}, Training time: {train_time}, Test time: {test_time}, \
                 Inter-Group Aggregate time: {agg_time}')
-    
+
     def select_clients(self, comm_round, num_clients=20):
         '''selects num_clients clients weighted by number of samples from possible_clients
             For the consideration of test comparability, we first select the client by round robin, and then select by randomly
@@ -213,7 +211,7 @@ class GroupBase(object):
             num_clients: number of clients to select; default 20
                 note that within function, num_clients is set to
                 min(num_clients, len(possible_clients))
-        
+
         Return:
             list of selected clients objects
         '''
@@ -232,7 +230,7 @@ class GroupBase(object):
             selected_clients = random.sample(self.clients, num_clients)
             random.seed(self.seed) # Restore the seed
         return selected_clients
-    
+
     def federated_averaging_aggregate(self, updates, nks):
         return self.weighted_aggregate(updates, nks)
 
@@ -249,13 +247,10 @@ class GroupBase(object):
             for la in range(num_layers):
                 agg_updates.append(np.sum([up[la]*pro for up, pro in zip(updates, normalws)], axis=0))
         else:  # ms模式, 元素为parameter_dict
-            agg_updates = {key:value*normalws[0] for key, value in updates[0].items()}
-            num_clients = len(updates)
-            for i in range(1, num_clients):
-                for key, value in updates[i].items():
-                    agg_updates[key] += value*normalws[i]
-            for key, value in agg_updates.items():
-                agg_updates[key] = Parameter(value, key)
+            agg_updates = {}
+            for key in updates[0].keys():
+                value_list = [up[key]*pro for up, pro in zip(updates, normalws)]
+                agg_updates[key] = np.sum(value_list, axis=0)
         return agg_updates # -> list
 
     '''
@@ -393,11 +388,7 @@ class GroupBase(object):
         if isinstance(prev_server_params, list):  # tf模式, 模型参数为list[np.array]
             self.server.latest_updates = [(new-prev) for prev, new in zip(prev_server_params, new_server_params)]
         else:  # ms模式, 模型参数为parameter_dict
-            self.server.latest_updates = {key:Parameter(value - prev_server_params[key], key) for key, value in new_server_params.items()}
-            # self.server.latest_updates = {}
-            # for name, param in new_server_params.items():
-            #     tensor = param.asnumpy().astype(np.float32) - prev_server_params[name].asnumpy().astype(np.float32)
-            #     self.server.latest_updates[name] = ms.Parameter(tensor, name)
+            self.server.latest_updates = {key:value - prev_server_params[key] for key, value in new_server_params.items()}
         self.server.latest_params = new_server_params
 
     """ This function will randomly swap <warm> clients' data with probability swap_p
@@ -416,7 +407,7 @@ class GroupBase(object):
                 cidx1, cidx2 = shuffle_idx[idx], shuffle_idx[-(idx+1)]
                 c1, c2 = clients[cidx1], clients[cidx2]
                 g1, g2 = c1.uplink[0], c2.uplink[0]
-                
+
                 # Swap train data and test data
                 if scope == 'all':
                     c1.distribution_shift, c2.distribution_shift = True, True
@@ -443,7 +434,7 @@ class GroupBase(object):
                         label_idx2 = np.where(c2_data['y'] == c2_swap_label)[0]
                         c1_swap_x, c2_swap_x = c1_data['x'][label_idx1], c2_data['x'][label_idx2]
                         c1_swap_y, c2_swap_y = c1_data['y'][label_idx1], c2_data['y'][label_idx2]
-                        
+
                         # Swap the feature
                         c1_data['x'] = np.delete(c1_data['x'], label_idx1, axis=0)
                         c1_data['x'] = np.vstack([c1_data['x'], c2_swap_x])
@@ -473,7 +464,7 @@ class GroupBase(object):
     def increase_data(self, round, clients):
         processing_round = [0, 50, 100, 150]
         rate = [1/4, 1/2, 3/4, 1.0]
-        
+
         if round == 0:
             self.shuffle_index_dict = {}
             # Shuffle the train data
@@ -481,7 +472,7 @@ class GroupBase(object):
                 cidx = np.arange(c.train_data['y'].size)
                 np.random.shuffle(cidx)
                 self.shuffle_index_dict[c] = cidx
-        
+
         if round in processing_round:
             release_rate = rate[processing_round.index(round)]
             print('>Round {:3d}, {:.1%} training data release.'.format(round, release_rate))

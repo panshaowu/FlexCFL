@@ -6,8 +6,6 @@ from termcolor import colored
 from math import ceil
 
 import tensorflow as tf
-import mindspore as ms
-from mindspore import Parameter
 
 from flearn.server import Server
 from flearn.client import Client
@@ -81,7 +79,7 @@ class FedAvg(object):
             # 1, Random select clients
             selected_clients = self.select_clients(comm_round)
             #selected_clients = self.clients[:20] # DEBUG, only use first 20 clients to train
-            
+
             # * Change the clients's data distribution
             self.data_distribution_shift(comm_round, self.clients, self.shift_type, self.swap_p)
 
@@ -91,7 +89,7 @@ class FedAvg(object):
                 if self.platform == "tf":
                     c.latest_updates = [(w1-w0) for w0, w1 in zip(c.latest_params, self.server.latest_params)]
                 else:
-                    c.latest_updates = {key:ms.Parameter(param - c.latest_params[key], key) for key, param in self.server.latest_params.items()}
+                    c.latest_updates = {key:param - c.latest_params[key] for key, param in self.server.latest_params.items()}
                 # Broadcast the gloabl model to selected clients
                 c.latest_params = self.server.latest_params
 
@@ -101,19 +99,19 @@ class FedAvg(object):
             train_time = round(time.time() - start_time, 3)
             if train_results == None:
                 continue
-            
+
             # 4, Summary this round of training
             num_train_clients, weighted_train_acc, weighted_train_loss = self.summary_results(comm_round, train_results=train_results)
 
             # 5, Get model updates (list) and number of samples (list) of clients
             nks = [rest[1] for rest in train_results] # -> list
             updates = [rest[4] for rest in train_results] # -> list
-            
+
             # 6, Aggregate these client acoording to number of samples (FedAvg)
             start_time = time.time()
             agg_updates = self.federated_averaging_aggregate(updates, nks, platform=self.platform)
             agg_time = round(time.time() - start_time, 3)
-            
+
             # 7, Apply update to the global model. All clients and sever share
             # the same model instance, so we just apply update to server and refresh
             # the latest_params and lastest_updates for selected clients. 
@@ -132,7 +130,7 @@ class FedAvg(object):
             # 8, Test the model every eval_every round and the last round
             if comm_round % self.eval_every == 0 or comm_round == self.num_rounds-1:
                 start_time = time.time()
-                
+
                 if self.eval_locally == False:
                     # Test model on all clients,
                     #test_results = self.server.test()
@@ -151,15 +149,15 @@ class FedAvg(object):
 
             # 9, Print the train, aggregate, test time
             print(f'Round: {comm_round}, Training time: {train_time}, Test time: {test_time}, Aggregate time: {agg_time}')
-    
+
     def select_clients(self, comm_round, num_clients=20):
         '''selects num_clients clients weighted by number of samples from possible_clients
-        
+
         Args:
             num_clients: number of clients to select; default 20
                 note that within function, num_clients is set to
                 min(num_clients, len(possible_clients))
-        
+
         Return:
             list of selected clients objects
         '''
@@ -169,7 +167,7 @@ class FedAvg(object):
         selected_clients = random.sample(self.clients, num_clients)
         random.seed(self.seed) # Restore the seed
         return selected_clients
-    
+
     def federated_averaging_aggregate(self, updates, nks, platform="tf"):
         return self.weighted_aggregate(updates, nks, platform)
 
@@ -177,7 +175,6 @@ class FedAvg(object):
     def weighted_aggregate(self, updates, weights, platform="tf"):
         # Aggregate the updates according their weights
         normalws = np.array(weights, dtype=float) / np.sum(weights, dtype=np.float)
-        num_clients = len(updates)
         num_layers = len(updates[0])
         # Shape=(num_clients, num_layers, num_params)
         # np_updates = np.array(updates, dtype=float).reshape(num_clients, num_layers, -1)
@@ -186,17 +183,10 @@ class FedAvg(object):
             for la in range(num_layers):
                 agg_updates.append(np.sum([up[la]*pro for up, pro in zip(updates, normalws)], axis=0))
         else:
-            agg_updates = {key:value*normalws[0] for key, value in updates[0].items()}
-            num_clients = len(updates)
-            for i in range(1, num_clients):
-                for key, value in updates[i].items():
-                    agg_updates[key] += value * normalws[i]
-            for key, value in agg_updates.items():
-                agg_updates[key] = Parameter(value, key)
-        # np_agg_updates = np.sum(np_updates*normalws, axis=0) #-> shape=(num_layers, num_params)
-        # Convert numpy array to list of array format (keras weights format)
-        #agg_updates = [np_agg_updates[i] for i in range(num_layers)]
-
+            agg_updates = {}
+            for key in updates[0].keys():
+                value_list = [up[key]*pro for up, pro in zip(updates, normalws)]
+                agg_updates[key] = np.sum(value_list, axis=0)
         return agg_updates # -> list
 
     def summary_results(self, comm_round, train_results=None, test_results=None):
@@ -275,7 +265,7 @@ class FedAvg(object):
                 cidx1, cidx2 = shuffle_idx[idx], shuffle_idx[-(idx+1)]
                 c1, c2 = clients[cidx1], clients[cidx2]
                 g1, g2 = c1.uplink[0], c2.uplink[0]
-                
+
                 # Swap train data and test data
                 if scope == 'all':
                     c1.distribution_shift, c2.distribution_shift = True, True
@@ -301,7 +291,7 @@ class FedAvg(object):
                         label_idx2 = np.where(c2_data['y'] == c2_swap_label)[0]
                         c1_swap_x, c2_swap_x = c1_data['x'][label_idx1], c2_data['x'][label_idx2]
                         c1_swap_y, c2_swap_y = c1_data['y'][label_idx1], c2_data['y'][label_idx2]
-                        
+
                         # Swap the feature
                         c1_data['x'] = np.delete(c1_data['x'], label_idx1, axis=0)
                         c1_data['x'] = np.vstack([c1_data['x'], c2_swap_x])
@@ -331,7 +321,7 @@ class FedAvg(object):
     def increase_data(self, round, clients):
         processing_round = [0, 50, 100, 150]
         rate = [1/4, 1/2, 3/4, 1.0]
-        
+
         if round == 0:
             self.shuffle_index_dict = {}
             # Shuffle the train data
@@ -339,7 +329,7 @@ class FedAvg(object):
                 cidx = np.arange(c.train_data['y'].size)
                 np.random.shuffle(cidx)
                 self.shuffle_index_dict[c] = cidx
-        
+
         if round in processing_round:
             release_rate = rate[processing_round.index(round)]
             print('>Round {:3d}, {:.1%} training data release.'.format(round, release_rate))
@@ -352,7 +342,6 @@ class FedAvg(object):
 
                 c.refresh()
                 if c.has_uplink(): c.uplink[0].refresh()
-        return
 
     def data_distribution_shift(self, round, clients, shift_type=None, swap_p=0):
         if shift_type == None:
@@ -360,7 +349,6 @@ class FedAvg(object):
 
         if shift_type == 'increment':
             self.increase_data(round, clients)
-        else:       
+        else:
             if len(clients) == 0: return
             self.swap_data(clients, swap_p, shift_type)
-        return

@@ -52,7 +52,7 @@ class TrainConfig(object):
                     'temp_agg': False,
                     'recluster_epoch': None # [50, 100, 150]
                 })
-                
+
             if trainer in ['fesem',  'ifca']:
                 self.trainer_config.update({
                     'num_group': 3,
@@ -68,7 +68,7 @@ class TrainConfig(object):
                 'max_clients': 999,
                 'allow_empty': True
             }
-        
+
         if self.trainer_config['dataset'] == 'femnist':
             self.client_config.update({'learning_rate': 0.003})
             self.trainer_config.update({'num_group': 5})
@@ -89,7 +89,7 @@ class TrainConfig(object):
         if self.trainer_config['dataset'] == 'fmnist':
             self.client_config.update({'learning_rate': 0.005})
             self.trainer_config.update({'num_group': 5})
-        
+
         if trainer == 'splitfed':
             #TODO: plan for split learning
             pass
@@ -100,7 +100,7 @@ class TrainConfig(object):
 def process_grad(grads, platform="tf"):
     '''
     Args:
-        grads: grad 
+        grads: grad
     Return:
         a flattened grad in numpy (1-D array)
     '''
@@ -111,9 +111,9 @@ def process_grad(grads, platform="tf"):
         # (784, 10) append (10,)
     else:  # ms格式下, grads是parameter_dict
         grads = list(grads.values())
-        client_grads = grads[0].asnumpy()
+        client_grads = grads[0]
         for i in range(1, len(grads)):
-            client_grads = np.append(client_grads, grads[i].asnumpy())
+            client_grads = np.append(client_grads, grads[i])
     # 输出转换为展开为一维张量的array
     return client_grads
 
