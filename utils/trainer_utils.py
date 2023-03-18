@@ -97,7 +97,7 @@ class TrainConfig(object):
             #TODO:
             pass
 
-def process_grad(grads, platform="tf"):
+def process_grad(grads, platform="tf", sparse_ratio=0.001):
     '''
     Args:
         grads: grad
@@ -114,6 +114,11 @@ def process_grad(grads, platform="tf"):
         client_grads = grads[0]
         for i in range(1, len(grads)):
             client_grads = np.append(client_grads, grads[i])
+    # 若sparse_ratio非0, 则对client_grads进行稀疏化处理
+    if sparse_ratio > 0 and sparse_ratio < 1:
+        grads_len = round(len(client_grads) * sparse_ratio)
+        grads_zero_idx = np.argpartition(-np.abs(client_grads), grads_len)[grads_len:]
+        client_grads[grads_zero_idx] = 0.
     # 输出转换为展开为一维张量的array
     return client_grads
 
